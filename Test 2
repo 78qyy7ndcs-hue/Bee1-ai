@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>AI-armband test v2</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #0b0b0d;
+      color: #f5f5f5;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 0.3rem;
+    }
+    h2 {
+      font-size: 1.1rem;
+      margin-top: 1.2rem;
+      margin-bottom: 0.3rem;
+    }
+    button {
+      padding: 10px 16px;
+      margin: 4px 4px 12px 0;
+      border-radius: 999px;
+      border: none;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    #startBtn {
+      background: #38bdf8;
+      color: #000;
+    }
+    #stopBtn {
+      background: #4b5563;
+      color: #fff;
+    }
+    #status {
+      margin-bottom: 10px;
+      font-size: 0.95rem;
+      opacity: 0.9;
+    }
+    #log, #reminders {
+      background: #111827;
+      border-radius: 8px;
+      padding: 10px;
+      max-height: 40vh;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.85rem;
+      border: 1px solid #374151;
+    }
+    .entry {
+      border-bottom: 1px solid #374151;
+      padding: 6px 0;
+    }
+    .entry:last-child {
+      border-bottom: none;
+    }
+    .label {
+      font-weight: 600;
+      color: #a3e635;
+    }
+    .json {
+      white-space: pre-wrap;
+      color: #e5e7eb;
+    }
+    .error {
+      color: #f97373;
+    }
+    .pill {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.75rem;
+      margin-right: 4px;
+      background: #1f2937;
+      color: #e5e7eb;
+    }
+    .pill.todo { background: #22c55e33; }
+    .pill.event { background: #6366f133; }
+    .pill-low { opacity: .6; }
+    .small-btn {
+      font-size: 0.8rem;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: none;
+      margin-top: 4px;
+      background: #22c55e;
+      color: #000;
+      cursor: pointer;
+    }
+    .small-btn:disabled {
+      opacity: .4;
+      cursor: default;
+    }
+    .rem-row {
+      padding: 4px 0;
+      border-bottom: 1px solid #374151;
+    }
+    .rem-row:last-child {
+      border-bottom: none;
+    }
+    .rem-title {
+      font-weight: 600;
+      color: #e5e7eb;
+    }
+    .rem-meta {
+      font-size: 0.75rem;
+      opacity: 0.7;
+    }
+  </style>
+</head>
+<body>
+  <h1>AI-armband test v2</h1>
+  <p>
+    Tryck <b>Starta lyssning</b> och säg t.ex:<br>
+    <i>"Vi har prov på söndag"</i><br>
+    <i>"Påminn mig att plugga matte imorgon klockan sju"</i><br>
+    <i>"Har du fixat vattenläckan än?"</i>
+  </p>
+
+  <button id="startBtn">▶️ Starta lyssning</button>
+  <button id="stopBtn">⏹ Stoppa lyssning</button>
+  <div id="status">Status: inte igång</div>
+
+  <h2>Senaste tolkningar</h2>
+  <div id="log"></div>
+
+  <h2>Sparade påminnelser</h2>
+  <div id="reminders">Inga sparade än.</div>
+
+  <script>
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const remEl = document.getElementById('reminders');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    let recognition = null;
+    let listening = false;
+    let reminders = [];
+
+    // === SETUP SPEECH ===
+    if (!SpeechRecognition) {
+      statusEl.innerHTML = 'Status: <span class="error">Din webbläsare stödjer inte röstigenkänning (testa Chrome / Edge på mobilen).</span>';
+    } else {
+      recognition = new SpeechRecognition();
+      recognition.lang = 'sv-SE';
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        listening = true;
+        statusEl.textContent = 'Status: Lyssnar... prata tydligt nära micken.';
+      };
+      recognition.onend = () => {
+        listening = false;
+        statusEl.textContent = 'Status: stoppad.';
+      };
+      recognition.onerror = (event) => {
+        addLog('Fel: ' + event.error, null, true);
+        statusEl.textContent = 'Status: fel – ' + event.error;
+      };
+      recognition.onresult = (event) => {
+        const result = event.results[event.results.length - 1];
+        const transcript = result[0].transcript.trim();
+        handleTranscript(transcript);
+      };
+    }
+
+    // === HELPERS ===
+    function cleanText(text) {
+      let t = text.toLowerCase();
+      // Ta bort lite "fyll-ord"
+      t = t.replace(/\basså\b/g, ' ');
+      t = t.replace(/\btyp\b/g, ' ');
+      t = t.replace(/\blik(a|som)\b/g, ' ');
+      t = t.replace(/\bba\b/g, ' ');
+      t = t.replace(/\s+/g, ' ');
+      return t.trim();
+    }
+
+    function addLog(text, parsed, isError = false) {
+      const div = document.createElement('div');
+      div.className = 'entry';
+      if (isError) {
+        div.innerHTML = `<div class="error">${text}</div>`;
+        logEl.prepend(div);
+        return;
+      }
+
+      const confClass = parsed && parsed.säkerhet < 0.4 ? 'pill pill-low' : 'pill';
+      const typClass = parsed && parsed.typ ? `pill ${parsed.typ}` : 'pill pill-low';
+
+      let html = `<div><span class="label">Röst:</span> "${text}"</div>`;
+      if (parsed) {
+        html += `<div>`;
+        if (parsed.typ) {
+          html += `<span class="${typClass}">${parsed.typ}</span>`;
+        } else {
+          html += `<span class="${confClass}">oklar</span>`;
+        }
+        html += `<span class="${confClass}">säkerhet ${(parsed.säkerhet * 100).toFixed(0)}%</span>`;
+        html += `</div>`;
+        html += `<div class="json">${JSON.stringify(parsed, null, 2)}</div>`;
+        const disabled = !parsed.typ ? 'disabled' : '';
+        html += `<button class="small-btn" ${disabled}>Spara som påminnelse</button>`;
+      }
+
+      div.innerHTML = html;
+      if (parsed && parsed.typ) {
+        const btn = div.querySelector('button.small-btn');
+        btn.addEventListener('click', () => {
+          saveReminder(parsed);
+          btn.disabled = true;
+          btn.textContent = 'Sparad ✅';
+        });
+      }
+      logEl.prepend(div);
+    }
+
+    function renderReminders() {
+      if (!reminders.length) {
+        remEl.textContent = 'Inga sparade än.';
+        return;
+      }
+      remEl.innerHTML = '';
+      reminders.forEach(r => {
+        const row = document.createElement('div');
+        row.className = 'rem-row';
+        row.innerHTML = `
+          <div class="rem-title">${r.titel || r.råText}</div>
+          <div class="rem-meta">
+            Typ: ${r.typ || 'okänd'}
+            ${r.dag ? ' • Dag: ' + r.dag : ''}
+            ${r.tidsinfo ? ' • Tid: ' + r.tidsinfo : ''}
+          </div>
+        `;
+        remEl.appendChild(row);
+      });
+    }
+
+    function saveReminder(parsed) {
+      reminders.push(parsed);
+      renderReminders();
+    }
+
+    // === PARSING / "AI" ===
+    function parseReminder(text) {
+      const rawLower = text.toLowerCase().trim();
+      const lower = cleanText(text);
+
+      const result = {
+        råText: text,
+        typ: null,
+        titel: null,
+        dag: null,
+        tidsinfo: null,
+        säkerhet: 0.0
+      };
+
+      let score = 0;
+
+      const dagar = ['måndag', 'tisdag', 'onsdag', 'torsdag', 'fredag', 'lördag', 'söndag'];
+      for (const d of dagar) {
+        if (lower.includes(d)) {
+          result.dag = d;
+          score += 0.2;
+          break;
+        }
+      }
+
+      if (lower.includes('imorgon') || lower.includes('i morgon')) {
+        result.tidsinfo = (result.tidsinfo ? result.tidsinfo + ' ' : '') + 'imorgon';
+        score += 0.2;
+      } else if (lower.includes('idag')) {
+        result.tidsinfo = (result.tidsinfo ? result.tidsinfo + ' ' : '') + 'idag';
+        score += 0.1;
+      } else if (lower.includes('ikväll')) {
+        result.tidsinfo = (result.tidsinfo ? result.tidsinfo + ' ' : '') + 'ikväll';
+        score += 0.15;
+      }
+
+      const klockMatch = lower.match(/klockan\s+([0-9]{1,2}(:[0-9]{2})?)/);
+      if (klockMatch) {
+        result.tidsinfo = (result.tidsinfo ? result.tidsinfo + ' ' : '') + ('klockan ' + klockMatch[1]);
+        score += 0.25;
+      }
+
+      // 1) Fråge-todo: "har du ... än?"
+      if (lower.startsWith('har du') && (lower.includes('än') || lower.includes('klart'))) {
+        result.typ = 'todo';
+        const middle = lower.replace('har du', '').split('än')[0].split('klart')[0].trim();
+        result.titel = middle || text;
+        score += 0.4;
+      }
+
+      // 2) Prov / läxa / träning / jobb
+      if (/(prov|läxa|läxan|träning|match|jobb|möte)/.test(lower)) {
+        result.typ = result.typ || 'event';
+        if (!result.titel) {
+          const provMatch = lower.match(/vi har (.+?) (på|imorgon|i morgon|idag)/);
+          if (provMatch) {
+            result.titel = provMatch[1].trim();
+          } else {
+            result.titel = text;
+          }
+        }
+        score += 0.3;
+      }
+
+      // 3) Påminn mig / glöm inte
+      if (lower.includes('påminn mig att')) {
+        result.typ = 'todo';
+        const parts = lower.split('påminn mig att');
+        result.titel = (parts[1] || '').trim() || text;
+        score += 0.4;
+      }
+      if (lower.includes('glöm inte att')) {
+        result.typ = 'todo';
+        const parts = lower.split('glöm inte att');
+        result.titel = (parts[1] || '').trim() || text;
+        score += 0.35;
+      }
+
+      // 4) Måste / ska
+      if (!result.typ && (lower.includes('måste') || lower.includes('ska jag') || lower.includes('ska vi'))) {
+        result.typ = 'todo';
+        result.titel = text;
+        score += 0.25;
+      }
+
+      // Normalisera "säkerhet"
+      result.säkerhet = Math.max(0, Math.min(1, score));
+
+      return result;
+    }
+
+    function handleTranscript(transcript) {
+      const parsed = parseReminder(transcript);
+      addLog(transcript, parsed, false);
+      console.log('Transcript:', transcript);
+      console.log('Parsed:', parsed);
+    }
+
+    // === BUTTONS ===
+    startBtn.addEventListener('click', () => {
+      if (!recognition) return;
+      if (!listening) {
+        try {
+          recognition.start();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    });
+
+    stopBtn.addEventListener('click', () => {
+      if (!recognition) return;
+      if (listening) {
+        recognition.stop();
+      }
+    });
+  </script>
+</body>
+</html>
