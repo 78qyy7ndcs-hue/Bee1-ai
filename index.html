@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>AI-armband test</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #111;
+      color: #f5f5f5;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 0.5rem;
+    }
+    button {
+      padding: 10px 16px;
+      margin: 4px 4px 12px 0;
+      border-radius: 999px;
+      border: none;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    #startBtn {
+      background: #38bdf8;
+      color: #000;
+    }
+    #stopBtn {
+      background: #888;
+      color: #fff;
+    }
+    #status {
+      margin-bottom: 10px;
+      font-size: 0.95rem;
+      opacity: 0.9;
+    }
+    #log {
+      background: #181818;
+      border-radius: 8px;
+      padding: 10px;
+      max-height: 60vh;
+      overflow-y: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 0.85rem;
+      border: 1px solid #333;
+    }
+    .entry {
+      border-bottom: 1px solid #333;
+      padding: 6px 0;
+    }
+    .entry:last-child {
+      border-bottom: none;
+    }
+    .label {
+      font-weight: 600;
+      color: #a3e635;
+    }
+    .json {
+      white-space: pre-wrap;
+      color: #e5e7eb;
+    }
+    .error {
+      color: #f97373;
+    }
+  </style>
+</head>
+<body>
+  <h1>AI-armband test (mobilmikrofon)</h1>
+  <p>Tryck på <b>Starta lyssning</b> och säg t.ex:<br>
+    <i>"Vi har prov på söndag"</i><br>
+    <i>"Har du fixat vattenläckan än?"</i>
+  </p>
+
+  <button id="startBtn">▶️ Starta lyssning</button>
+  <button id="stopBtn">⏹ Stoppa lyssning</button>
+  <div id="status">Status: inte igång</div>
+
+  <div id="log"></div>
+
+  <script>
+    // Kolla om Web Speech API finns
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    let recognition = null;
+    let listening = false;
+
+    if (!SpeechRecognition) {
+      statusEl.innerHTML = 'Status: <span class="error">Din webbläsare stödjer inte röstigenkänning (testa Chrome på Android).</span>';
+    } else {
+      recognition = new SpeechRecognition();
+      recognition.lang = 'sv-SE';       // svenska
+      recognition.continuous = true;    // fortsätt lyssna tills vi stoppar
+      recognition.interimResults = false;
+
+      recognition.onstart = () => {
+        listening = true;
+        statusEl.textContent = 'Status: Lyssnar... (prata normalt nära mobilen)';
+      };
+
+      recognition.onend = () => {
+        listening = false;
+        statusEl.textContent = 'Status: stoppad.';
+      };
+
+      recognition.onerror = (event) => {
+        addLog('Fel: ' + event.error, null, true);
+        statusEl.textContent = 'Status: fel – ' + event.error;
+      };
+
+      recognition.onresult = (event) => {
+        // Hämta senaste resultatet
+        const result = event.results[event.results.length - 1];
+        const transcript = result[0].transcript.trim();
+        handleTranscript(transcript);
+      };
+    }
+
+    function addLog(text, parsed, isError = false) {
+      const div = document.createElement('div');
+      div.className = 'entry';
+      let html = '';
+      if (isError) {
+        html += `<div class="error">${text}</div>`;
+      } else {
+        html += `<div><span class="label">Röst:</span> "${text}"</div>`;
+        if (parsed) {
+          html += `<div><span class="label">Tolkat:</span></div>`;
+          html += `<div class="json">${JSON.stringify(parsed, null, 2)}</div>`;
+        }
+      }
+      div.innerHTML = html;
+      logEl.prepend(div);
+    }
+
+    // Enkel "AI" som tolkar svenska meningar till en struktur
+    function parseReminder(text) {
+      const lower = text.toLowerCase().trim();
+
+      const result = {
+        råText: text,
+        typ: null,       // 'event' eller 'todo'
+        titel: null,
+        dag: null,       // t.ex. 'söndag'
+        tidsinfo: null   // t.ex. 'imorgon', 'klockan nio'
+      };
+
+      // Ord för dagar / tid (superenkel detektering)
+      const dagar = ['måndag','tisdag','onsdag','torsdag','fredag','lördag','söndag'];
+      for (const d of dagar) {
+        if (lower.includes(d)) {
+          result.dag = d;
+          break;
+        }
+      }
+
+      // Enkla tidsord
+      if (lower.includes('imorgon')) result.tidsinfo = 'imorgon';
+      else if (lower.includes('idag')) result.tidsinfo = 'idag';
+      else if (lower.includes('ikväll')) result.tidsinfo = 'ikväll';
+      else if (lower.includes('i morgon')) result.tidsinfo = 'imorgon';
+
+      // Regex för "klockan X"
+      const klockMatch = lower.match(/klockan\s+([0-9]{1,2}(:[0-9]{2})?)/);
+      if (klockMatch) {
+        result.tidsinfo = (result.tidsinfo ? result.tidsinfo + ' ' : '') + ('klockan ' + klockMatch[1]);
+      }
+
+      // 1) Fråge-todo: "har du ... än?"
+      if (lower.startsWith('har du') && lower.includes('än')) {
+        result.typ = 'todo';
+        // Försök plocka ut texten mellan "har du" och "än"
+        const middle = lower.replace('har du', '').split('än')[0].trim();
+        result.titel = middle || text;
+        return result;
+      }
+
+      // 2) Saker som låter som event / prov / grej som händer
+      if (lower.includes('prov') || lower.startsWith('vi har') || lower.includes('vi har')) {
+        result.typ = 'event';
+        result.titel = text;
+        return result;
+      }
+
+      // 3) "påminn mig att ..." eller "glöm inte att ..."
+      if (lower.includes('påminn mig att')) {
+        result.typ = 'todo';
+        const parts = lower.split('påminn mig att');
+        result.titel = (parts[1] || '').trim() || text;
+        return result;
+      }
+      if (lower.includes('glöm inte att')) {
+        result.typ = 'todo';
+        const parts = lower.split('glöm inte att');
+        result.titel = (parts[1] || '').trim() || text;
+        return result;
+      }
+
+      // Om inget matchar men det ser ut som en uppgift
+      if (lower.includes('måste') || lower.includes('ska jag') || lower.includes('ska vi')) {
+        result.typ = 'todo';
+        result.titel = text;
+        return result;
+      }
+
+      // Ingen träff – returnera ändå råText
+      return result;
+    }
+
+    function handleTranscript(transcript) {
+      const parsed = parseReminder(transcript);
+      addLog(transcript, parsed, false);
+      console.log('Transcript:', transcript);
+      console.log('Parsed:', parsed);
+    }
+
+    startBtn.addEventListener('click', () => {
+      if (!recognition) return;
+      if (!listening) {
+        try {
+          recognition.start();
+        } catch (e) {
+          // kan kasta om den redan är igång
+          console.error(e);
+        }
+      }
+    });
+
+    stopBtn.addEventListener('click', () => {
+      if (!recognition) return;
+      if (listening) {
+        recognition.stop();
+      }
+    });
+  </script>
+</body>
+</html>
